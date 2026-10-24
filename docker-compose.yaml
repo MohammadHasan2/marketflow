@@ -1,0 +1,103 @@
+﻿services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow_local
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow", "-d", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-init:
+    image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5-python3.12}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &airflow-common-env
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+      PYTHONPATH: /opt/airflow
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY}
+      MARKET_SYMBOLS: ${MARKET_SYMBOLS:-AAPL,MSFT,GOOGL}
+      MARKETFLOW_API_TIMEOUT: ${MARKETFLOW_API_TIMEOUT:-30}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_local@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      AIRFLOW__WEBSERVER__SECRET_KEY: marketflow-local-development-key
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "False"
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    volumes: &airflow-volumes
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./src/marketflow:/opt/airflow/marketflow
+      - ./data:/opt/airflow/data
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        (airflow users create
+          --username "$${_AIRFLOW_WWW_USER_USERNAME}"
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}"
+          --firstname Market
+          --lastname Flow
+          --role Admin
+          --email marketflow-local@example.com || true)
+    restart: "no"
+
+  airflow-webserver:
+    image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5-python3.12}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-common-env
+    volumes: *airflow-volumes
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5-python3.12}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-common-env
+    volumes: *airflow-volumes
+    command: scheduler
+    healthcheck:
+      test:
+        - CMD
+        - airflow
+        - jobs
+        - check
+        - --job-type
+        - SchedulerJob
+        - --hostname
+        - "$${HOSTNAME}"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:
